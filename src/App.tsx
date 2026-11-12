@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { CheckCircle2, Play, ExternalLink } from 'lucide-react';
 import {
   initAuth,
   googleSignIn,
@@ -11,58 +10,106 @@ import {
   type DriveColabFile,
 } from './services/googleWorkspace';
 import {
-  generateColabNotebookJson,
-  type ColabAccount,
+  HARDWARE_PROFILES,
+  type ColabRuntimeSession,
   type ColabWorkerSnapshot,
   type VideoJob,
   type WanModelId,
+  type HardwareTargetId,
+  type CameraMotionType,
 } from './utils/colabEngine';
-import { ColabAccountsView } from './components/ColabAccountsView';
-import { WorkerHubView } from './components/WorkerHubView';
-import { GatewayTrafficView } from './components/GatewayTrafficView';
+import { OverviewView } from './components/OverviewView';
+import { VideoStudioView } from './components/VideoStudioView';
+import { SettingsView } from './components/SettingsView';
 
-type ActiveSection = 'accounts' | 'workers' | 'gateway';
+type ActiveTab = 'overview' | 'studio' | 'settings';
+const STUDIO_SESSION_TOKEN = 'wan_studio_ui_session_v2';
+
+const DEFAULT_SESSION: ColabRuntimeSession = {
+  sessionId: 'wan-worker',
+  accountEmail: 'chu.maitv99@gmail.com',
+  displayName: 'Chu Mai',
+  hardwareTarget: 'tpu_v5e',
+  hardwareLabel: HARDWARE_PROFILES.tpu_v5e.label,
+  state: 'DISCONNECTED',
+  cliBinaryAvailable: false,
+  adcAuthenticated: false,
+  workerConnected: false,
+  workerId: null,
+  gpuNameReported: null,
+  vramUsedGb: null,
+  vramTotalGb: 16.0,
+  vramIsMeasured: false,
+  computeUnitsUsed: 0,
+  computeUnitsLimit: 100,
+  activeJobsCount: 0,
+  completedJobsCount: 0,
+  lastHeartbeatAt: null,
+  startedAt: null,
+  lastError: null,
+};
 
 export default function App() {
-  const [activeSection, setActiveSection] = useState<ActiveSection>('accounts');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
   const [appUrl, setAppUrl] = useState<string>(window.location.origin);
-  const [workerAuthToken, setWorkerAuthToken] = useState<string>('wh_fastwan_colab_cluster_99');
+  const [maskedWorkerToken, setMaskedWorkerToken] = useState<string>('wh_wan_••••••••••••');
   const [selectedModel, setSelectedModel] = useState<WanModelId>(
     'FastVideo/FastWan2.1-T2V-1.3B-Diffusers'
   );
-  const [accounts, setAccounts] = useState<ColabAccount[]>([]);
+  const [session, setSession] = useState<ColabRuntimeSession>(DEFAULT_SESSION);
   const [workers, setWorkers] = useState<ColabWorkerSnapshot[]>([]);
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [apiKeys, setApiKeys] = useState<any[]>([]);
-  const [traffic, setTraffic] = useState<any>({ '24h': [], '7d': [], '30d': [] });
+  const [logs, setLogs] = useState<any[]>([]);
+  const [settings, setSettings] = useState({
+    enforceApiKey: true,
+    maxJobRetries: 2,
+    leaseTimeoutSec: 180,
+  });
 
-  // Google OAuth & Google Drive state
+  // Google OAuth & Drive state
   const [googleUser, setGoogleUser] = useState<User | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [driveFiles, setDriveFiles] = useState<DriveColabFile[]>([]);
-  const [isLoadingDrive, setIsLoadingDrive] = useState(false);
-  const [driveError, setDriveError] = useState<string | null>(null);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // E2E Test state
+  // CLI & E2E state
+  const [isControllingCli, setIsControllingCli] = useState(false);
   const [isRunningE2E, setIsRunningE2E] = useState(false);
   const [e2eSteps, setE2eSteps] = useState<string[] | null>(null);
+  const [e2eModeLabel, setE2eModeLabel] = useState<string>('');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
   const syncedUserEmailRef = useRef<string | null>(null);
+
+  const safeParseJson = async (res: Response): Promise<Record<string, any> | null> => {
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return null;
+    }
+    try {
+      return await res.json();
+    } catch {
+      return null;
+    }
+  };
 
   const fetchClusterState = useCallback(async () => {
     try {
-      const res = await fetch('/api/cluster/state');
+      const res = await fetch('/api/cluster/state', {
+        headers: { Accept: 'application/json' },
+      });
       if (!res.ok) return;
-      const data = await res.json();
+      const data = await safeParseJson(res);
+      if (!data) return;
       if (data.appUrl) setAppUrl(data.appUrl);
-      if (data.workerAuthToken) setWorkerAuthToken(data.workerAuthToken);
-      if (Array.isArray(data.accounts)) setAccounts(data.accounts);
+      if (data.maskedWorkerAuthToken) setMaskedWorkerToken(data.maskedWorkerAuthToken);
+      if (data.session) setSession(data.session);
       if (Array.isArray(data.workers)) setWorkers(data.workers);
       if (Array.isArray(data.jobs)) setJobs(data.jobs);
       if (Array.isArray(data.apiKeys)) setApiKeys(data.apiKeys);
-      if (data.traffic) setTraffic(data.traffic);
-    } catch (e) {
-      console.error('Cluster state fetch error:', e);
+      if (Array.isArray(data.logs)) setLogs(data.logs);
+      if (data.settings) setSettings(data.settings);
+    } catch {
+      // Ignore transient network/warmup errors during polling
     }
   }, []);
 
@@ -73,24 +120,17 @@ export default function App() {
   }, [fetchClusterState]);
 
   const refreshDriveFiles = useCallback(async () => {
-    setIsLoadingDrive(true);
-    setDriveError(null);
     try {
       const files = await listColabFilesFromDrive();
       setDriveFiles(files);
-    } catch (err: any) {
-      if (err?.message !== 'NO_ACCESS_TOKEN') {
-        setDriveError(err?.message || 'Không thể tải danh sách tệp từ Google Drive.');
-      }
-    } finally {
-      setIsLoadingDrive(false);
+    } catch {
+      // Ignore if not signed into Drive
     }
   }, []);
 
-  // Auto-sync signed-in Google User into Colab Pool immediately
   useEffect(() => {
     const unsubscribe = initAuth(
-      async (user) => {
+      async (user, token) => {
         setGoogleUser(user);
         refreshDriveFiles();
         if (user.email && syncedUserEmailRef.current !== user.email) {
@@ -103,6 +143,7 @@ export default function App() {
                 email: user.email,
                 displayName: user.displayName,
                 photoURL: user.photoURL,
+                accessToken: token,
               }),
             });
             await fetchClusterState();
@@ -122,7 +163,6 @@ export default function App() {
 
   const handleGoogleLogin = async () => {
     setIsSigningIn(true);
-    setDriveError(null);
     try {
       const result = await googleSignIn();
       if (result) {
@@ -135,14 +175,15 @@ export default function App() {
             email: result.user.email,
             displayName: result.user.displayName,
             photoURL: result.user.photoURL,
+            accessToken: result.accessToken,
           }),
         });
         await fetchClusterState();
         await refreshDriveFiles();
-        setToastMessage(`Đã kết nối Google OAuth (${result.user.email}) vào Pool TPU v5e-1.`);
+        setToastMessage(`Đã đăng nhập Google OAuth & tự động đồng bộ Colab ADC (${result.user.email}).`);
       }
     } catch (err: any) {
-      setDriveError(err?.message || 'Đăng nhập Google OAuth không thành công.');
+      setToastMessage(err?.message || 'Đăng nhập Google không thành công.');
     } finally {
       setIsSigningIn(false);
     }
@@ -156,207 +197,230 @@ export default function App() {
     setToastMessage('Đã đăng xuất Google OAuth.');
   };
 
-  const handleRunE2ETest = async () => {
+  const handleCliAction = async (action: 'start' | 'stop' | 'check', hw?: HardwareTargetId) => {
+    setIsControllingCli(true);
+    try {
+      const res = await fetch(`/api/colab/cli/${action}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Wan-Studio-Session': STUDIO_SESSION_TOKEN,
+        },
+        body: JSON.stringify({
+          hardwareTarget: hw || session.hardwareTarget,
+          modelId: selectedModel,
+        }),
+      });
+      const data = (await safeParseJson(res)) || {};
+      if (data.session) setSession(data.session);
+      if (Array.isArray(data.logs)) setLogs(data.logs);
+      if (!res.ok || data.ok === false) {
+        setToastMessage(data.error || data.message || `Thao tác CLI '${action}' có cảnh báo.`);
+      } else {
+        setToastMessage(data.message || `Đã thực thi Colab CLI '${action}' thành công.`);
+      }
+    } catch (err: any) {
+      setToastMessage(err?.message || `Lỗi khi gọi Colab CLI '${action}'.`);
+    } finally {
+      setIsControllingCli(false);
+    }
+  };
+
+  const handleUpdateSettings = async (payload: Record<string, any>) => {
+    const res = await fetch('/api/settings/update', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Wan-Studio-Session': STUDIO_SESSION_TOKEN,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = (await safeParseJson(res)) || {};
+    if (!res.ok) {
+      setToastMessage(data.error || 'Không thể lưu cài đặt.');
+      return;
+    }
+    if (data.session) setSession(data.session);
+    if (data.settings) setSettings(data.settings);
+    setToastMessage('Đã cập nhật cấu hình hệ thống.');
+  };
+
+  const handleRevealWorkerToken = async (): Promise<string> => {
+    const res = await fetch('/api/settings/worker-token', {
+      headers: { 'X-Wan-Studio-Session': STUDIO_SESSION_TOKEN },
+    });
+    const data = (await safeParseJson(res)) || {};
+    return data.workerAuthToken || '';
+  };
+
+  const handleRunE2ETest = async (_mode: 'mock' | 'real_gpu' = 'real_gpu') => {
     setIsRunningE2E(true);
     setE2eSteps(null);
+    setE2eModeLabel('Real TPU v5e-1 Wan Inference Test');
     try {
       const res = await fetch('/api/e2e/verify', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cleanAfter: false }),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Wan-Studio-Session': STUDIO_SESSION_TOKEN,
+        },
+        body: JSON.stringify({ mode: 'real_gpu' }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'Kiểm thử E2E thất bại');
-      }
+      const data = (await safeParseJson(res)) || {};
+      if (Array.isArray(data.stepsLog)) setE2eSteps(data.stepsLog);
       if (Array.isArray(data.jobs)) setJobs(data.jobs);
-      if (data.traffic) setTraffic(data.traffic);
-      setE2eSteps(data.stepsLog || []);
-      setToastMessage(
-        `Test E2E thành công: Đã kết nối WebSocket Worker -> Nhận request /v1/video/generations -> Hoàn tất Job ${data.jobId} (100%).`
-      );
+      if (Array.isArray(data.logs)) setLogs(data.logs);
+      if (data.session) setSession(data.session);
+
+      if (!res.ok || !data.ok) {
+        setToastMessage(data.error || 'Chưa có Colab TPU v5e-1 Worker thật kết nối.');
+      } else {
+        setToastMessage(`Real TPU v5e-1 Wan E2E hoàn tất: Job ${data.jobId}.`);
+      }
     } catch (err: any) {
-      setToastMessage(err?.message || 'Lỗi khi chạy Test E2E.');
+      setToastMessage(err?.message || 'Lỗi khi chạy E2E.');
     } finally {
       setIsRunningE2E(false);
     }
   };
 
-  const activeColabAccount = accounts.find((a) => a.state === 'ACTIVE');
+  const queuedOrActiveCount = jobs.filter(
+    (j) =>
+      j.status === 'QUEUED' ||
+      j.status === 'DISPATCHED' ||
+      j.status === 'DIFFUSING' ||
+      j.status === 'ENCODING'
+  ).length;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* Top Bar: 3 clean zones */}
-      <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-800/90 bg-slate-950/95 sticky top-0 z-40 backdrop-blur-md">
+      {/* Top Navigation Bar: WAN Studio · Tổng quan | Tạo video | Cài đặt */}
+      <header className="flex items-center justify-between gap-6 px-6 py-3.5 border-b border-slate-800/90 bg-slate-950/95 sticky top-0 z-40 backdrop-blur-md">
         <a
-          href="#accounts"
+          href="#overview"
           onClick={(e) => {
             e.preventDefault();
-            setActiveSection('accounts');
+            setActiveTab('overview');
           }}
-          className="text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
+          className="text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 flex items-center gap-2"
         >
-          Wan2.1 Colab TPU Hub
+          <span>WAN Studio</span>
+          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-amber-400">
+            Colab Orchestrator
+          </span>
         </a>
 
         <nav
           aria-label="Điều hướng chính"
-          className="flex items-center gap-6 text-sm font-medium text-slate-400 overflow-x-auto"
+          className="flex items-center gap-6 text-sm font-medium text-slate-400"
         >
           <button
             type="button"
-            onClick={() => setActiveSection('accounts')}
-            className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeSection === 'accounts'
+            onClick={() => setActiveTab('overview')}
+            className={`transition-colors whitespace-nowrap pb-0.5 ${
+              activeTab === 'overview'
                 ? 'text-amber-400 border-b-2 border-amber-400'
                 : 'hover:text-slate-100'
             }`}
           >
-            1. Tài khoản & Drive ({accounts.length})
+            Tổng quan
           </button>
           <button
             type="button"
-            onClick={() => setActiveSection('workers')}
-            className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeSection === 'workers'
+            onClick={() => setActiveTab('studio')}
+            className={`transition-colors whitespace-nowrap pb-0.5 ${
+              activeTab === 'studio'
                 ? 'text-amber-400 border-b-2 border-amber-400'
                 : 'hover:text-slate-100'
             }`}
           >
-            2. Colab TPU v5e-1 Notebook ({workers.length} Online)
+            Tạo video
           </button>
           <button
             type="button"
-            onClick={() => setActiveSection('gateway')}
-            className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeSection === 'gateway'
+            onClick={() => setActiveTab('settings')}
+            className={`transition-colors whitespace-nowrap pb-0.5 ${
+              activeTab === 'settings'
                 ? 'text-amber-400 border-b-2 border-amber-400'
                 : 'hover:text-slate-100'
             }`}
           >
-            3. API Gateway & Test E2E ({apiKeys.length} Keys)
+            Cài đặt
           </button>
         </nav>
 
-        <div className="flex items-center shrink-0">
-          {!googleUser ? (
-            <button
-              type="button"
-              onClick={handleGoogleLogin}
-              disabled={isSigningIn}
-              className="gsi-material-button"
-            >
-              <div className="gsi-material-button-state"></div>
-              <div className="gsi-material-button-content-wrapper">
-                <div className="gsi-material-button-icon">
-                  <svg
-                    version="1.1"
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 48 48"
-                    style={{ display: 'block' }}
-                  >
-                    <path
-                      fill="#EA4335"
-                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                    ></path>
-                    <path
-                      fill="#4285F4"
-                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                    ></path>
-                    <path
-                      fill="#FBBC05"
-                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                    ></path>
-                    <path
-                      fill="#34A853"
-                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                    ></path>
-                    <path fill="none" d="M0 0h48v48H0z"></path>
-                  </svg>
-                </div>
-                <span className="gsi-material-button-contents">
-                  {isSigningIn ? 'Đang kết nối...' : 'Sign in with Google'}
-                </span>
-              </div>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setActiveSection('accounts')}
-              className="px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-amber-500 rounded-lg hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0"
-            >
-              {googleUser.email}
-            </button>
-          )}
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="text-xs font-mono text-slate-400 hidden sm:inline">
+            {googleUser?.email || session.accountEmail}
+          </span>
+          <button
+            type="button"
+            onClick={() => setActiveTab('studio')}
+            className="px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-amber-500 rounded-lg hover:bg-amber-400 transition-colors"
+          >
+            + Tạo video
+          </button>
         </div>
       </header>
 
       <main className="flex-1 max-w-[1340px] w-full mx-auto px-6 py-6 space-y-6">
-        {/* Compact 3-Step Workflow Strip + Status */}
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-4 text-xs">
-            <button
-              type="button"
-              onClick={() => setActiveSection('accounts')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-colors ${
-                googleUser || accounts.length > 0
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                  : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
-              }`}
-            >
-              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-              <span>
-                <strong>Bước 1:</strong>{' '}
-                {googleUser
-                  ? `Đã đăng nhập (${googleUser.email})`
-                  : 'Đăng nhập Google / Thêm TK Colab'}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveSection('workers')}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-950 hover:border-amber-500/50 text-slate-200 transition-colors"
-            >
-              <ExternalLink className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>
-                <strong>Bước 2:</strong> Tải/Đẩy file <code className="font-mono">.ipynb</code> lên
-                Colab chọn <strong>v5e-1 TPU</strong> & bấm Run All
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveSection('gateway')}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-950 hover:border-amber-500/50 text-slate-200 transition-colors"
-            >
-              <Play className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>
-                <strong>Bước 3:</strong> Tạo API Key & Gắn{' '}
-                <code className="font-mono text-amber-300">/v1/video/generations</code> vào App ngoài
-              </span>
-            </button>
+        {/* 4 Summary KPI Cards matching the Review Specification */}
+        <section
+          aria-label="Trạng thái tổng quan hệ thống"
+          className="grid grid-cols-2 lg:grid-cols-4 gap-4"
+        >
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="text-xs text-slate-400">Colab Runtime</div>
+            <div className="text-sm font-bold text-slate-100 mt-1">
+              {session.gpuNameReported || session.hardwareLabel}
+            </div>
+            <div className="text-[11px] font-mono text-amber-400 mt-0.5">
+              {HARDWARE_PROFILES[session.hardwareTarget]?.torchDtype}
+            </div>
           </div>
 
-          <div className="flex items-center gap-5 text-xs font-mono tabular-nums">
-            <div>
-              <span className="text-slate-500">Active Node: </span>
-              <span className="text-emerald-400 font-semibold">
-                {activeColabAccount ? activeColabAccount.email : 'Chưa có'}
-              </span>
-            </div>
-            <div>
-              <span className="text-slate-500">Workers: </span>
-              <span className="text-slate-100 font-semibold">{workers.length} Online</span>
-            </div>
-            <button
-              type="button"
-              onClick={handleRunE2ETest}
-              disabled={isRunningE2E}
-              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-sans font-semibold transition-colors whitespace-nowrap disabled:opacity-50"
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="text-xs text-slate-400">Trạng thái</div>
+            <div
+              className={`text-sm font-bold mt-1 ${
+                session.workerConnected
+                  ? 'text-emerald-400'
+                  : session.state === 'ERROR'
+                  ? 'text-rose-400'
+                  : 'text-slate-200'
+              }`}
             >
-              {isRunningE2E ? 'Đang chạy E2E...' : 'Chạy Test E2E'}
-            </button>
+              {session.workerConnected
+                ? 'Đã kết nối (READY)'
+                : session.state === 'DISCONNECTED'
+                ? 'Chưa kết nối'
+                : session.state}
+            </div>
+            <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+              {workers.length} Worker Online
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="text-xs text-slate-400">Hàng đợi (SQLite)</div>
+            <div className="text-sm font-bold text-slate-100 mt-1 font-mono">
+              {queuedOrActiveCount} jobs đang chờ/chạy
+            </div>
+            <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+              Tổng cộng: {jobs.length} jobs
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="text-xs text-slate-400">Compute Units</div>
+            <div className="text-sm font-bold text-slate-100 mt-1 font-mono">
+              {session.computeUnitsUsed > 0
+                ? `${session.computeUnitsUsed} / ${session.computeUnitsLimit ?? 100} CU`
+                : '—'}
+            </div>
+            <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+              Ngân sách: {session.computeUnitsLimit ?? 100} CU
+            </div>
           </div>
         </section>
 
@@ -377,17 +441,15 @@ export default function App() {
         )}
 
         {e2eSteps && (
-          <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/20 p-4 space-y-2">
+          <div className="rounded-xl border border-slate-700 bg-slate-900/80 p-4 space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-emerald-400">
-                Kết quả Kiểm thử End-to-End (WebSocket Worker ↔ /v1/video/generations)
-              </span>
+              <span className="text-xs font-bold text-amber-400">{e2eModeLabel}</span>
               <button
                 type="button"
                 onClick={() => setE2eSteps(null)}
                 className="text-xs text-slate-400 hover:text-white"
               >
-                Ẩn
+                Ẩn kết quả
               </button>
             </div>
             <ul className="space-y-1 text-xs font-mono text-slate-300">
@@ -398,110 +460,94 @@ export default function App() {
           </div>
         )}
 
-        {activeSection === 'accounts' && (
-          <ColabAccountsView
-            accounts={accounts}
-            appUrl={appUrl}
-            workerAuthToken={workerAuthToken}
-            selectedModel={selectedModel}
+        {activeTab === 'overview' && (
+          <OverviewView
+            session={session}
+            workers={workers}
+            jobs={jobs}
+            logs={logs}
             googleUser={googleUser}
             isSigningIn={isSigningIn}
-            driveFiles={driveFiles}
-            isLoadingDrive={isLoadingDrive}
-            driveError={driveError}
+            isControllingCli={isControllingCli}
             onGoogleLogin={handleGoogleLogin}
             onGoogleLogout={handleGoogleLogout}
-            onRefreshDriveFiles={refreshDriveFiles}
-            onUploadNotebookToDrive={async (filename, nbJson) => {
-              await uploadColabNotebookToDrive(filename, nbJson);
-              await refreshDriveFiles();
+            onChangeHardwareTarget={async (hw) => {
+              await handleUpdateSettings({ hardwareTarget: hw });
             }}
-            onDeleteDriveFile={async (file) => {
-              await deleteDriveFileById(file.id);
-              await refreshDriveFiles();
+            onStartRuntime={async () => {
+              await handleCliAction('start');
             }}
-            onRotatePool={async () => {
-              const res = await fetch('/api/workers/colab/rotate', { method: 'POST' });
+            onStopRuntime={async () => {
+              await handleCliAction('stop');
+            }}
+            onCheckRuntimeStatus={async () => {
+              await handleCliAction('check');
+            }}
+            onOpenVideoStudio={() => setActiveTab('studio')}
+            onOpenSettings={() => setActiveTab('settings')}
+            onClearJobs={async () => {
+              const res = await fetch('/api/jobs', { method: 'DELETE' });
               const data = await res.json();
-              if (!res.ok) throw new Error(data.error || 'Không thể xoay vòng tài khoản.');
-              if (Array.isArray(data.accounts)) setAccounts(data.accounts);
-              if (Array.isArray(data.workers)) setWorkers(data.workers);
+              if (Array.isArray(data.jobs)) setJobs(data.jobs);
+              await fetchClusterState();
             }}
-            onPrewarmPool={async (accountId) => {
-              const res = await fetch('/api/workers/colab/prewarm', {
+          />
+        )}
+
+        {activeTab === 'studio' && (
+          <VideoStudioView
+            session={session}
+            jobs={jobs}
+            selectedModel={selectedModel}
+            onSelectModel={setSelectedModel}
+            onCreateJob={async (payload) => {
+              const res = await fetch('/v1/video/generations', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId }),
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Wan-Studio-Session': STUDIO_SESSION_TOKEN,
+                },
+                body: JSON.stringify(payload),
               });
               const data = await res.json();
-              if (!res.ok) throw new Error(data.error || 'Không thể kích hoạt Pre-warm.');
-              if (Array.isArray(data.accounts)) setAccounts(data.accounts);
-              if (Array.isArray(data.workers)) setWorkers(data.workers);
+              if (!res.ok) {
+                throw new Error(data.error || 'Lỗi tạo video.');
+              }
+              if (Array.isArray(data.jobs)) setJobs(data.jobs);
+              setToastMessage(`Đã thêm job ${data.id} vào hàng đợi SQLite.`);
+              return data.job;
             }}
-            onStartAccount={async (accountId) => {
-              const res = await fetch('/api/workers/colab/start', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId }),
-              });
-              const data = await res.json();
-              if (Array.isArray(data.accounts)) setAccounts(data.accounts);
-              if (Array.isArray(data.workers)) setWorkers(data.workers);
-            }}
-            onStopAccount={async (accountId) => {
-              const res = await fetch('/api/workers/colab/stop', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId }),
-              });
-              const data = await res.json();
-              if (Array.isArray(data.accounts)) setAccounts(data.accounts);
-              if (Array.isArray(data.workers)) setWorkers(data.workers);
-            }}
-            onAddAccount={async (payload) => {
-              const res = await fetch('/api/accounts/add', {
+            onOptimizePrompt={async (payload: {
+              prompt: string;
+              cameraMotion: CameraMotionType;
+              model: WanModelId;
+            }) => {
+              const res = await fetch('/api/ai/director', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
               });
               const data = await res.json();
-              if (!res.ok) throw new Error(data.error || 'Lỗi thêm tài khoản.');
-              if (Array.isArray(data.accounts)) setAccounts(data.accounts);
-            }}
-            onDeleteAccount={async (accountId) => {
-              const res = await fetch(`/api/accounts/${accountId}`, { method: 'DELETE' });
-              const data = await res.json();
-              if (Array.isArray(data.accounts)) setAccounts(data.accounts);
-              if (Array.isArray(data.workers)) setWorkers(data.workers);
+              if (!res.ok) {
+                throw new Error(data.error || 'Lỗi khi tối ưu prompt.');
+              }
+              return data.result;
             }}
           />
         )}
 
-        {activeSection === 'workers' && (
-          <WorkerHubView
-            workers={workers}
+        {activeTab === 'settings' && (
+          <SettingsView
             appUrl={appUrl}
-            workerAuthToken={workerAuthToken}
+            session={session}
+            maskedWorkerToken={maskedWorkerToken}
             selectedModel={selectedModel}
-            onSelectModel={setSelectedModel}
-          />
-        )}
-
-        {activeSection === 'gateway' && (
-          <GatewayTrafficView
-            traffic={traffic}
             apiKeys={apiKeys}
-            jobs={jobs}
-            appUrl={appUrl}
-            selectedModel={selectedModel}
+            settings={settings}
+            driveFiles={driveFiles}
             isRunningE2E={isRunningE2E}
-            onRunE2ETest={handleRunE2ETest}
-            onClearJobs={async () => {
-              const res = await fetch('/api/jobs', { method: 'DELETE' });
-              const data = await res.json();
-              if (Array.isArray(data.jobs)) setJobs(data.jobs);
-              if (data.traffic) setTraffic(data.traffic);
-            }}
+            onUpdateSettings={handleUpdateSettings}
+            onRevealWorkerToken={handleRevealWorkerToken}
             onCreateApiKey={async (payload) => {
               const res = await fetch('/api/apikeys', {
                 method: 'POST',
@@ -516,6 +562,16 @@ export default function App() {
               const res = await fetch(`/api/apikeys/${id}`, { method: 'DELETE' });
               const data = await res.json();
               if (Array.isArray(data.apiKeys)) setApiKeys(data.apiKeys);
+            }}
+            onRunE2ETest={handleRunE2ETest}
+            onUploadNotebookToDrive={async (filename, nbJson) => {
+              await uploadColabNotebookToDrive(filename, nbJson);
+              await refreshDriveFiles();
+              setToastMessage(`Đã lưu ${filename} lên Google Drive.`);
+            }}
+            onDeleteDriveFile={async (file) => {
+              await deleteDriveFileById(file.id);
+              await refreshDriveFiles();
             }}
           />
         )}

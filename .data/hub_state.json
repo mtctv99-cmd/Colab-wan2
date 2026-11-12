@@ -7,7 +7,7 @@
       "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocIPrlf9csdcRpRNCUxlWxoFAhEWL0W4OvRAdKImgtfLEV5S2w=s96-c",
       "state": "ACTIVE",
       "gpuType": "TPU v5e-1 (16GB HBM)",
-      "activeRunSeconds": 3664,
+      "activeRunSeconds": 5220,
       "cooldownRemainingSeconds": 0,
       "lastUsedAt": "2026-11-12T04:45:53.271Z",
       "workerId": "colab-tpu-v5e-1642",

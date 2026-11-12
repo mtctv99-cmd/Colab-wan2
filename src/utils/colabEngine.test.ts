@@ -1,165 +1,112 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  computeWanLatentFrames,
+  WAN_MODEL_ADAPTERS,
+  HARDWARE_PROFILES,
   calculateFastWanMetrics,
-  evaluateAccountLifecycle,
-  rotateColabPool,
-  generateFastWanWorkerScript,
-  generateColabNotebookJson,
   applyCameraMotionToPrompt,
-  RUN_DURATION_SEC,
-  PREWARM_THRESHOLD_SEC,
-  COOLDOWN_DURATION_SEC,
-  type ColabAccount,
+  isValidMp4Buffer,
+  buildColabCliCommands,
+  generateFastWanWorkerScript,
 } from './colabEngine';
 
-test('computeWanLatentFrames enforces Wan2.1 4k+1 temporal frame constraint (81 frames @ 5s 16fps)', () => {
-  const frames5s16fps = computeWanLatentFrames(5, 16);
-  assert.equal((frames5s16fps - 1) % 4, 0);
-  assert.equal(frames5s16fps, 81);
+test('FastWan 2.1 1.3B adapter follows official model card and defaults to TPU v5e-1 BF16', () => {
+  const fastWan = WAN_MODEL_ADAPTERS['FastVideo/FastWan2.1-T2V-1.3B-Diffusers'];
+  assert.equal(fastWan.defaultSteps, 3);
+  assert.equal(fastWan.defaultFrames, 61);
+  assert.equal(fastWan.defaultWidth16x9, 832);
+  assert.equal(fastWan.defaultHeight16x9, 448);
 
-  const frames5s24fps = computeWanLatentFrames(5, 24);
-  assert.equal((frames5s24fps - 1) % 4, 0);
-  assert.equal(frames5s24fps, 121);
-});
-
-test('calculateFastWanMetrics computes 8.2GB HBM usage and locks 832x480x81 when lockXlaShape is enabled', () => {
-  const mLocked = calculateFastWanMetrics({
-    resolution: '720p',
-    aspectRatio: '9:16',
-    durationSec: 10,
-    fps: 24,
-    inferenceSteps: 4,
-    enableTeaCache: true,
-    cpuOffload: false,
-    lockXlaShape: true,
+  const defaultMetrics = calculateFastWanMetrics({
+    model: 'FastVideo/FastWan2.1-T2V-1.3B-Diffusers',
+    resolution: '480p',
+    aspectRatio: '16:9',
+    durationSec: 4,
+    fps: 16,
+    inferenceSteps: 3,
   });
-
-  assert.equal(mLocked.width, 832);
-  assert.equal(mLocked.height, 480);
-  assert.equal(mLocked.latentFrames, 81);
-  assert.equal(mLocked.estimatedVramGb, 8.2);
-  assert.equal(mLocked.fitsOnFreeT4, true);
-  assert.ok(mLocked.speedupFactor >= 10);
+  assert.equal(defaultMetrics.width, 832);
+  assert.equal(defaultMetrics.height, 448);
+  assert.equal(defaultMetrics.latentFrames, 61);
+  assert.equal(defaultMetrics.torchDtype, 'torch.bfloat16');
+  assert.equal(defaultMetrics.isEstimated, true);
 });
 
-test('applyCameraMotionToPrompt prepends cinematic camera trajectory cues without duplication', () => {
-  const raw = 'a lone cyberpunk detective walking through a rainy neon-lit alley in Tokyo';
-  const withDolly = applyCameraMotionToPrompt(raw, 'dolly_in');
-  assert.ok(withDolly.includes('35mm dolly-in tracking shot'));
-  assert.equal(applyCameraMotionToPrompt(withDolly, 'dolly_in'), withDolly);
-});
+test('TPU v5e-1 bootstrap.py worker script configures torch_xla, PJRT_DEVICE, xm.xla_device(), and xm.mark_step()', () => {
+  assert.equal(HARDWARE_PROFILES.tpu_v5e.cliFlag, '--tpu v5e-1');
+  assert.equal(HARDWARE_PROFILES.tpu_v5e.torchDtype, 'torch.bfloat16');
+  assert.equal(HARDWARE_PROFILES.tpu_v5e.vramTotalGb, 16.0);
 
-test('evaluateAccountLifecycle triggers prewarm at 2h35m (9300s) and rotation at 3h (10800s)', () => {
-  const baseAccount: ColabAccount = {
-    id: 'acc-1',
-    email: 'colab.node01@gmail.com',
-    displayName: 'Colab Worker 01',
-    state: 'ACTIVE',
-    gpuType: 'TPU v5e-1 (16GB HBM)',
-    activeRunSeconds: 5000,
-    cooldownRemainingSeconds: 0,
-    lastUsedAt: new Date().toISOString(),
-    workerId: 'colab-tpu-0001',
-    vramUsedGb: 8.2,
-    vramTotalGb: 16.0,
-    completedJobs: 14,
-    oauthConnected: true,
-    warpProxyEnabled: true,
-  };
-
-  const early = evaluateAccountLifecycle(baseAccount);
-  assert.equal(early.shouldPrewarmNext, false);
-  assert.equal(early.shouldRotateNow, false);
-
-  const atPrewarm = evaluateAccountLifecycle({
-    ...baseAccount,
-    activeRunSeconds: PREWARM_THRESHOLD_SEC + 10,
-  });
-  assert.equal(atPrewarm.shouldPrewarmNext, true);
-  assert.equal(atPrewarm.shouldRotateNow, false);
-
-  const atExpiry = evaluateAccountLifecycle({
-    ...baseAccount,
-    activeRunSeconds: RUN_DURATION_SEC,
-  });
-  assert.equal(atExpiry.shouldRotateNow, true);
-  assert.equal(atExpiry.remainingRunSec, 0);
-});
-
-test('rotateColabPool retires ACTIVE account to 16h COOLDOWN and promotes PREWARMING successor', () => {
-  const pool: ColabAccount[] = [
-    {
-      id: 'acc-1',
-      email: 'colab1@gmail.com',
-      displayName: 'Account 1',
-      state: 'ACTIVE',
-      gpuType: 'TPU v5e-1 (16GB HBM)',
-      activeRunSeconds: 10800,
-      cooldownRemainingSeconds: 0,
-      lastUsedAt: '',
-      workerId: 'colab-tpu-01',
-      vramUsedGb: 8.2,
-      vramTotalGb: 16,
-      completedJobs: 12,
-      oauthConnected: true,
-      warpProxyEnabled: true,
-    },
-    {
-      id: 'acc-2',
-      email: 'colab2@gmail.com',
-      displayName: 'Account 2',
-      state: 'PREWARMING',
-      gpuType: 'TPU v5e-1 (16GB HBM)',
-      activeRunSeconds: 0,
-      cooldownRemainingSeconds: 0,
-      lastUsedAt: '',
-      workerId: 'colab-tpu-02',
-      vramUsedGb: 0,
-      vramTotalGb: 16,
-      completedJobs: 5,
-      oauthConnected: true,
-      warpProxyEnabled: true,
-    },
-  ];
-
-  const { updatedAccounts, promotedAccount, retiredAccount } = rotateColabPool(pool);
-  assert.equal(promotedAccount?.id, 'acc-2');
-  assert.equal(retiredAccount?.id, 'acc-1');
-
-  const a1 = updatedAccounts.find((a) => a.id === 'acc-1')!;
-  const a2 = updatedAccounts.find((a) => a.id === 'acc-2')!;
-  assert.equal(a1.state, 'COOLDOWN');
-  assert.equal(a1.cooldownRemainingSeconds, COOLDOWN_DURATION_SEC);
-  assert.equal(a2.state, 'ACTIVE');
-});
-
-test('generateFastWanWorkerScript includes all production Wan 2.1 capabilities', () => {
-  const script = generateFastWanWorkerScript({
-    serverUrl: 'https://example.run.app',
-    workerId: 'colab-tpu-test',
-    workerToken: 'wk_secret_123',
+  const defaultTpuScript = generateFastWanWorkerScript({
+    serverUrl: 'https://hub.example.com',
+    workerId: 'wan-tpu-01',
+    workerToken: 'tok_secret_123',
     modelId: 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers',
-    runtimeType: 'tpu_v5e',
   });
-  assert.ok(script.includes('Wan-AI/Wan2.1-T2V-1.3B-Diffusers'));
-  assert.ok(script.includes('pipe.enable_vae_tiling()'));
-  assert.ok(script.includes('pipe.enable_vae_slicing()'));
-  assert.ok(script.includes('UniPCMultistepScheduler.from_config'));
-  assert.ok(script.includes('flow_shift=flow_shift'));
-  assert.ok(script.includes('callback_on_step_end=step_callback'));
-  assert.ok(script.includes('job_error'));
+  assert.ok(defaultTpuScript.includes('os.environ.setdefault("PJRT_DEVICE", "TPU")'));
+  assert.ok(defaultTpuScript.includes('os.environ.setdefault("XLA_USE_BF16", "1")'));
+  assert.ok(defaultTpuScript.includes('import torch_xla'));
+  assert.ok(defaultTpuScript.includes('import torch_xla.core.xla_model as xm'));
+  assert.ok(defaultTpuScript.includes('import torch_xla.runtime as xr'));
+  assert.ok(defaultTpuScript.includes('device = xm.xla_device()'));
+  assert.ok(defaultTpuScript.includes('xm.get_memory_info(device)'));
+  assert.ok(defaultTpuScript.includes('xm.mark_step()'));
+  assert.ok(defaultTpuScript.includes('TORCH_DTYPE = torch.bfloat16'));
+});
 
-  const nbRaw = generateColabNotebookJson({
-    serverUrl: 'https://example.run.app',
-    workerId: 'colab-tpu-test',
-    workerToken: 'wk_secret_123',
+test('Tesla T4 fallback worker script enforces torch.float16 + enable_model_cpu_offload', () => {
+  assert.equal(HARDWARE_PROFILES.t4.torchDtype, 'torch.float16');
+  assert.equal(HARDWARE_PROFILES.t4.useCpuOffload, true);
+
+  const t4Script = generateFastWanWorkerScript({
+    serverUrl: 'https://hub.example.com',
+    workerId: 'wan-t4-01',
+    workerToken: 'tok_secret_123',
     modelId: 'FastVideo/FastWan2.1-T2V-1.3B-Diffusers',
-    runtimeType: 'tpu_v5e',
+    hardwareTarget: 't4',
   });
-  const parsed = JSON.parse(nbRaw);
-  assert.equal(parsed.nbformat, 4);
-  assert.equal(parsed.cells.length, 3);
-  assert.equal(parsed.metadata.colab.accelerator, 'TPU_V5E');
+  assert.ok(t4Script.includes('TORCH_DTYPE = torch.float16'));
+  assert.ok(t4Script.includes('pipe.enable_model_cpu_offload()'));
+  assert.ok(t4Script.includes('pipe.enable_vae_tiling()'));
+});
+
+test('buildColabCliCommands strictly favors TPU v5e-1 (--tpu v5e-1) provisioning via CLI', () => {
+  const cmds = buildColabCliCommands({
+    sessionName: 'wan-worker',
+    hardwareTarget: 'tpu_v5e',
+    bootstrapScriptPath: '.data/bootstrap.py',
+  });
+  assert.deepEqual(cmds.listSessionsCmd, ['colab', '--auth=adc', 'sessions']);
+  assert.deepEqual(cmds.provisionCmd, ['colab', '--auth=adc', 'new', '-s', 'wan-worker', '--tpu', 'v5e-1']);
+  assert.deepEqual(cmds.statusCmd, ['colab', '--auth=adc', 'status', '-s', 'wan-worker']);
+  assert.deepEqual(cmds.execBootstrapCmd, [
+    'colab',
+    '--auth=adc',
+    'exec',
+    '-s',
+    'wan-worker',
+    '-f',
+    '.data/bootstrap.py',
+  ]);
+  assert.deepEqual(cmds.stopCmd, ['colab', '--auth=adc', 'stop', '-s', 'wan-worker']);
+});
+
+test('isValidMp4Buffer checks ISO BMFF ftyp signature and minimum byte length', () => {
+  assert.equal(isValidMp4Buffer(null), false);
+  assert.equal(isValidMp4Buffer(Buffer.alloc(32)), false);
+
+  const validMp4 = Buffer.alloc(512);
+  validMp4.writeUInt32BE(24, 0);
+  validMp4.write('ftypisom', 4, 'ascii');
+  assert.equal(isValidMp4Buffer(validMp4), true);
+
+  const corrupted = Buffer.alloc(512);
+  corrupted.write('HTMLbody', 4, 'ascii');
+  assert.equal(isValidMp4Buffer(corrupted), false);
+});
+
+test('applyCameraMotionToPrompt injects cinematic camera cues cleanly', () => {
+  const out = applyCameraMotionToPrompt('a detective in rainy Tokyo', 'dolly_in');
+  assert.ok(out.startsWith('Slow 35mm dolly-in tracking shot'));
+  assert.ok(out.includes('a detective in rainy Tokyo'));
 });
