@@ -1,0 +1,157 @@
+{
+  "colabAccounts": [
+    {
+      "id": "colab-oauth-0632",
+      "email": "chu.maitv99@gmail.com",
+      "displayName": "Chu Mai",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocIPrlf9csdcRpRNCUxlWxoFAhEWL0W4OvRAdKImgtfLEV5S2w=s96-c",
+      "state": "ACTIVE",
+      "gpuType": "TPU v5e-1 (16GB HBM)",
+      "activeRunSeconds": 3664,
+      "cooldownRemainingSeconds": 0,
+      "lastUsedAt": "2026-11-12T04:45:53.271Z",
+      "workerId": "colab-tpu-v5e-1642",
+      "vramUsedGb": 8.2,
+      "vramTotalGb": 16,
+      "completedJobs": 2,
+      "oauthConnected": true,
+      "warpProxyEnabled": true
+    }
+  ],
+  "videoJobs": [],
+  "apiKeys": [],
+  "trafficSeries": {
+    "24h": [
+      {
+        "label": "00:00",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "04:00",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "08:00",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "12:00",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "16:00",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "20:00",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "Hiện tại",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      }
+    ],
+    "7d": [
+      {
+        "label": "T2",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "T3",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "T4",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "T5",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "T6",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "T7",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "CN",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      }
+    ],
+    "30d": [
+      {
+        "label": "Tuần 1",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "Tuần 2",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "Tuần 3",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      },
+      {
+        "label": "Tuần 4",
+        "requests": 0,
+        "diffusionSteps": 0,
+        "gpuSeconds": 0,
+        "avgLatencySec": 0
+      }
+    ]
+  }
+}

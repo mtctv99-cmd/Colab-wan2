@@ -1,0 +1,6 @@
+{
+  "name": "FastWan Colab Studio — Hub Provider Video Cloud",
+  "description": "Hệ thống điều phối Google Colab GPU Cluster chạy FastVideo/FastWan2.1-T2V-1.3B-Diffusers theo kiến trúc Hub_Provider, tích hợp Google OAuth, 24/7 Account Rotator và Gemini 4 Carbon Deep Thinking Director.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
